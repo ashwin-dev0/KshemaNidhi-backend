@@ -7,6 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy import Column, Float, ForeignKey, Integer, JSON, MetaData, String, Table, create_engine, select, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
@@ -42,8 +43,14 @@ def _engine(url, tls, ca):
         if os.environ.get("ALLOW_SQLITE_TESTS") != "1":
             raise RuntimeError("Configure DATABASE_URL for MySQL; SQLite is only supported by the test suite.")
         return create_engine(parsed, connect_args={"check_same_thread": False})
+    if parsed.drivername in {"postgres", "postgresql", "postgresql+pg8000"}:
+        options = {"timeout": 20}
+        if tls:
+            options["ssl_context"] = ssl.create_default_context(cafile=ca or None)
+        query = {key: value for key, value in parsed.query.items() if key not in {"sslmode", "channel_binding"}}
+        return create_engine(parsed.set(drivername="postgresql+pg8000", query=query), connect_args=options, poolclass=NullPool, hide_parameters=True)
     if parsed.drivername not in {"mysql", "mysql+pymysql"}:
-        raise RuntimeError("DATABASE_URL must use mysql+pymysql://")
+        raise RuntimeError("DATABASE_URL must use mysql+pymysql:// or postgresql://")
     parsed = parsed.set(drivername="mysql+pymysql", query={**parsed.query, "charset": "utf8mb4"})
     options = {"connect_timeout": 10, "read_timeout": 20, "write_timeout": 20}
     if tls:
@@ -94,6 +101,8 @@ def ensure_login_attempt(connection, key, now):
     values = {"key": key, "attempts": 0, "since": now}
     if connection.dialect.name == "mysql":
         statement = mysql_insert(login_attempts).values(**values).on_duplicate_key_update(key=key)
+    elif connection.dialect.name == "postgresql":
+        statement = postgres_insert(login_attempts).values(**values).on_conflict_do_nothing(index_elements=["key"])
     else:
         statement = sqlite_insert(login_attempts).values(**values).on_conflict_do_nothing(index_elements=["key"])
     connection.execute(statement)
